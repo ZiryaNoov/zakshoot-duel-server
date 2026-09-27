@@ -10,7 +10,7 @@ const PORT = parseInt(process.env.PORT || process.argv[2] || '8801');
 const log = (...a) => console.log(new Date().toISOString().slice(11, 19), ...a);
 
 const server = http.createServer((req, res) => {
-  if (req.url === '/health') { res.writeHead(200); res.end('ok ' + new Date().toISOString()); }
+  if (req.url === '/health') { res.writeHead(200); res.end('ok v2 ' + new Date().toISOString()); }
   else { res.writeHead(404); res.end(); }
 });
 
@@ -20,6 +20,10 @@ const waiting = [];        // sockets in find queue
 
 function accept(key) {
   return crypto.createHash('sha1').update(key + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11').digest('base64');
+}
+function ctrl(op, payload) {
+  const len = payload.length;
+  return Buffer.from([op | 0x80, len, ...payload]);
 }
 function frame(payload) {
   const len = payload.length;
@@ -34,6 +38,7 @@ server.on('upgrade', (req, sock) => {
   if (!key) { sock.destroy(); return; }
   sock.write('HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ' + accept(key) + '\r\n\r\n');
   const c = { sock, room: null, buf: Buffer.alloc(0), alive: true, lastSeen: Date.now() };
+  ALL.add(c);
   const send = o => { try { sock.write(frame(Buffer.from(typeof o === 'string' ? o : JSON.stringify(o)))); } catch {} };
   const bye = () => {
     c.alive = false;
@@ -50,6 +55,7 @@ server.on('upgrade', (req, sock) => {
     log('bye', c.id || '?', '| rooms', rooms.size, '| waiting', waiting.length);
   };
   c.send = send; c.bye = bye;
+  const _bye = bye; bye = () => { ALL.delete(c); _bye(); };
   c.id = 'c' + Math.random().toString(36).slice(2, 6);
 
   const handle = line => {
@@ -89,7 +95,8 @@ server.on('upgrade', (req, sock) => {
       const payload = Buffer.alloc(len);
       for (let i = 0; i < len; i++) payload[i] = c.buf[off + i] ^ mask[i & 3];
       c.buf = c.buf.slice(off + len);
-      if (op === 8) { bye(); return; }
+      if (op === 9) { try { sock.write(ctrl(0x0A, payload)); } catch {} }
+      else if (op === 8) { bye(); return; }
       if (op === 1) { const line = payload.toString('utf8'); if (line.trim()) handle(line); }
     }
   });
@@ -98,10 +105,17 @@ server.on('upgrade', (req, sock) => {
   log('open', c.id);
 });
 
-// prune idle (no data for 60s)
+const ALL = new Set();
+// liveness prune: game pings every 3s — silence >15s = player gone (Render's proxy
+// keeps dead upstream sockets open, so TCP close alone can't be trusted)
 setInterval(() => {
   const now = Date.now();
-  for (const c of [...waiting]) if (now - c.lastSeen > 60000) { c.send({t: 'srv', ev: 'timeout'}); c.bye(); }
-}, 15000);
+  for (const c of [...ALL]) {
+    if (now - c.lastSeen > 15000) {
+      if (waiting.includes(c)) c.send({t: 'srv', ev: 'timeout'});
+      c.bye();
+    }
+  }
+}, 5000);
 
 server.listen(PORT, () => log('duel-server on :' + PORT));
