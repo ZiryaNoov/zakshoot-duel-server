@@ -10,7 +10,7 @@ const PORT = parseInt(process.env.PORT || process.argv[2] || '8801');
 const log = (...a) => console.log(new Date().toISOString().slice(11, 19), ...a);
 
 const server = http.createServer((req, res) => {
-  if (req.url === '/health') { res.writeHead(200); res.end('ok v2 ' + new Date().toISOString()); }
+  if (req.url === '/health') { res.writeHead(200); res.end('ok v3 ' + new Date().toISOString()); }
   else { res.writeHead(404); res.end(); }
 });
 
@@ -41,6 +41,7 @@ server.on('upgrade', (req, sock) => {
   ALL.add(c);
   const send = o => { try { sock.write(frame(Buffer.from(typeof o === 'string' ? o : JSON.stringify(o)))); } catch {} };
   const bye = () => {
+    ALL.delete(c);
     c.alive = false;
     const w = waiting.indexOf(c); if (w >= 0) waiting.splice(w, 1);
     if (c.room) {
@@ -55,7 +56,6 @@ server.on('upgrade', (req, sock) => {
     log('bye', c.id || '?', '| rooms', rooms.size, '| waiting', waiting.length);
   };
   c.send = send; c.bye = bye;
-  const _bye = bye; bye = () => { ALL.delete(c); _bye(); };
   c.id = 'c' + Math.random().toString(36).slice(2, 6);
 
   const handle = line => {
