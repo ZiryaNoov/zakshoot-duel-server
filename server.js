@@ -111,7 +111,8 @@ const ALL = new Set();
 setInterval(() => {
   const now = Date.now();
   for (const c of [...ALL]) {
-    if (now - c.lastSeen > 15000) {
+    const limit = waiting.includes(c) ? 90000 : 15000;  // finders get 90s (human-paced); in-room = game pings 3s
+    if (now - c.lastSeen > limit) {
       if (waiting.includes(c)) c.send({t: 'srv', ev: 'timeout'});
       c.bye();
     }
