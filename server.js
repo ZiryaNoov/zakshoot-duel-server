@@ -9,9 +9,87 @@ import crypto from 'node:crypto';
 const PORT = parseInt(process.env.PORT || process.argv[2] || '8801');
 const log = (...a) => console.log(new Date().toISOString().slice(11, 19), ...a);
 
+const clients = new Map();   // cid -> {box:[], room:null, role, lastSeen, waiting:false, dead:false}
+const rooms2 = new Map();    // roomId -> {a, b}
+let nextRid = 1;
+function cid() { return 'c' + Math.random().toString(36).slice(2, 10); }
+function pollPrune() {
+  const now = Date.now();
+  for (const [id, c] of [...clients]) {
+    const gone = now - c.lastSeen > (c.waiting ? 12000 : 25000);
+    if (gone) {
+      if (c.room) {
+        const r = rooms2.get(c.room);
+        if (r) {
+          const other = r.a === id ? r.b : r.a;
+          rooms2.delete(c.room);
+          c.room = null;
+          if (other && clients.get(other)) clients.get(other).box.push(JSON.stringify({t:'srv', ev:'peer_left'}));
+        }
+      }
+      clients.delete(id);
+      log('prune', id);
+    }
+  }
+}
+setInterval(pollPrune, 5000);
+
 const server = http.createServer((req, res) => {
-  if (req.url === '/health') { res.writeHead(200); res.end('ok v3 ' + new Date().toISOString()); }
-  else { res.writeHead(404); res.end(); }
+  if (req.url === '/health') { res.writeHead(200); res.end('ok v5 ' + new Date().toISOString()); return; }
+  if (req.url === '/hub' && req.method === 'OPTIONS') {
+    res.writeHead(204, {'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Methods': 'POST, OPTIONS', 'Access-Control-Allow-Headers': 'Content-Type', 'Access-Control-Max-Age': '86400'});
+    res.end(); return;
+  }
+  if (req.url === '/hub' && req.method === 'POST') {
+    let body = '';
+    req.on('data', d => body += d);
+    req.on('end', () => {
+      res.writeHead(200, {'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*'});
+      let q = {};
+      try { q = JSON.parse(body || '{}'); } catch {}
+      log('hub', (q.cid || 'new'), q.find ? 'FIND' : (q.msgs ? q.msgs.length + 'm' : ''), q.leave ? 'LEAVE' : '');
+      let me = q.cid && clients.get(q.cid);
+      if (!me) { me = {box: [], room: null, role: null, lastSeen: Date.now(), waiting: false}; clients.set(me.cid = q.cid || cid(), me); }
+      me.lastSeen = Date.now();
+      if (q.find && !me.room) {
+        me.waiting = true;
+        me.box.push(JSON.stringify({t: 'srv', ev: 'queued'}));
+        const w = [...clients.values()].find(c => c !== me && c.waiting && !c.room);
+        if (w) {
+          const id = 'r' + (nextRid++);
+          rooms2.set(id, {a: w.cid, b: me.cid});
+          w.room = me.room = id; w.waiting = me.waiting = false;
+          w.role = 'host'; me.role = 'join';
+          w.box.push(JSON.stringify({t: 'srv', ev: 'paired', role: 'host'}));
+          me.box.push(JSON.stringify({t: 'srv', ev: 'paired', role: 'join'}));
+          log('poll-paired', w.cid, '+', me.cid);
+        }
+      }
+      if (q.msgs && Array.isArray(q.msgs) && me.room) {
+        const r = rooms2.get(me.room);
+        if (r) {
+          const other = r.a === me.cid ? clients.get(r.b) : clients.get(r.a);
+          if (other) for (const m of q.msgs) other.box.push(typeof m === 'string' ? m : JSON.stringify(m));
+        }
+      }
+      if (q.leave) {
+        if (me.room) {
+          const r = rooms2.get(me.room);
+          if (r) {
+            const other = r.a === me.cid ? clients.get(r.b) : clients.get(r.a);
+            rooms2.delete(me.room);
+            if (other) other.box.push(JSON.stringify({t: 'srv', ev: 'peer_left'}));
+          }
+          me.room = null;
+        }
+        me.waiting = false;
+      }
+      const out = me.box.splice(0, me.box.length);
+      res.end(JSON.stringify({cid: me.cid, msgs: out}));
+    });
+    return;
+  }
+  res.writeHead(404); res.end();
 });
 
 let nextRoom = 1;
